@@ -2,11 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // --- CONFIGURATION ---
-// Ensure GEMINI_API_KEY is set in your .env.local file
 const apiKey = process.env.GEMINI_API_KEY || "";
 const genAI = new GoogleGenerativeAI(apiKey);
-
-// Optional: Add UNSPLASH_ACCESS_KEY in .env.local for real dynamic images
 const unsplashKey = process.env.UNSPLASH_ACCESS_KEY || "";
 
 interface TripRequest {
@@ -15,65 +12,60 @@ interface TripRequest {
   budget: string;
   travelers: string;
   interests: string[];
+  startDate?: string;
 }
 
 // --- HELPER: FETCH IMAGE ---
 async function fetchDestinationImage(destination: string): Promise<string> {
-  // If no Unsplash key is configured, fallback to a reliable source or generic URL
-  if (!unsplashKey) {
-    return `https://source.unsplash.com/1600x900/?${encodeURIComponent(destination)},travel`;
-  }
-
-  try {
-    const response = await fetch(
-      `https://api.unsplash.com/search/photos?query=${encodeURIComponent(destination)}&orientation=landscape&per_page=1`,
-      { headers: { Authorization: `Client-ID ${unsplashKey}` } }
-    );
-    
-    if (!response.ok) {
-        throw new Error('Unsplash API failed');
+  // 1. Try Unsplash if key exists
+  if (unsplashKey) {
+    try {
+      const response = await fetch(
+        `https://api.unsplash.com/search/photos?query=${encodeURIComponent(destination)}&orientation=landscape&per_page=1`,
+        { headers: { Authorization: `Client-ID ${unsplashKey}` } }
+      );
+      
+      if (response.ok) {
+        const data = await response.json();
+        return data.results?.[0]?.urls?.regular || `https://loremflickr.com/1200/800/${encodeURIComponent(destination)},travel/all`;
+      }
+    } catch (e) {
+      console.warn("Unsplash API failed, falling back");
     }
-
-    const data = await response.json();
-    return data.results?.[0]?.urls?.regular || `https://source.unsplash.com/1600x900/?${encodeURIComponent(destination)}`;
-  } catch (error) {
-    console.warn("Image fetch failed, using fallback");
-    // Generic fallback if API fails
-    return `https://source.unsplash.com/1600x900/?travel`;
   }
+  // 2. Reliable Fallback
+  return `https://loremflickr.com/1200/800/${encodeURIComponent(destination)},travel/all`;
 }
 
 export async function POST(req: NextRequest) {
   try {
-    // 1. Security & Validation
     if (!apiKey) {
       return NextResponse.json(
-        { error: "Server misconfiguration: API Key missing. Please check .env.local" },
+        { error: "Server misconfiguration: API Key missing." },
         { status: 500 }
       );
     }
 
     const body: TripRequest = await req.json();
-    const { destination, days, budget, travelers, interests } = body;
+    const { destination, days, budget, travelers, interests, startDate } = body;
 
     if (!destination || !days) {
       return NextResponse.json(
-        { error: "Missing required fields: Destination and Days are required." },
+        { error: "Destination and Days are required." },
         { status: 400 }
       );
     }
 
-    // 2. AI Model Setup
     const model = genAI.getGenerativeModel({ 
       model: "gemini-2.5-flash-preview-09-2025",
       generationConfig: { responseMimeType: "application/json" }
     });
 
-    // 3. Prompt Engineering
     const systemPrompt = `
       You are an expert travel agent. Create a comprehensive travel plan for a ${days}-day trip to ${destination}.
       
       User Profile:
+      - Start Date: ${startDate || "Not specified (assume optimal season)"}
       - Budget: ${budget}
       - Travelers: ${travelers}
       - Interests: ${interests.join(', ')}
@@ -91,6 +83,7 @@ export async function POST(req: NextRequest) {
         "days": [ 
           { 
             "day": 1, 
+            "date": "YYYY-MM-DD", 
             "theme": "Theme of the day", 
             "activities": [ 
               { 
@@ -98,42 +91,35 @@ export async function POST(req: NextRequest) {
                 "activity": "Name of activity", 
                 "type": "food" | "sightseeing" | "relax", 
                 "description": "Short description", 
-                "location": "Neighborhood/Area" 
+                "location": "Specific Name of Place (for Google Maps)" 
               } 
             ] 
           } 
         ] 
       }
-      3. Be specific with restaurant names and locations.
     `;
 
-    // 4. Parallel Execution (AI Generation + Image Fetch)
-    // We run these in parallel to reduce total wait time
     const [aiResult, imageUrl] = await Promise.all([
       model.generateContent(systemPrompt),
       fetchDestinationImage(destination)
     ]);
 
-    // 5. Processing & Sanitization
     const textResponse = aiResult.response.text();
-    // Remove markdown code fences if present (e.g. ```json ... ```)
+    // Clean potential markdown blocks
     const jsonString = textResponse.replace(/^```json\n|\n```$/g, '');
-    let data;
     
+    let data;
     try {
         data = JSON.parse(jsonString);
     } catch (e) {
-        console.error("JSON Parse Error:", jsonString);
         throw new Error("Failed to parse AI response");
     }
 
-    // 6. Merge Data
-    // Inject the real image URL into the AI response
     data = { ...data, heroImage: imageUrl };
 
-    return NextResponse.json(data, { status: 200 });
+    return NextResponse.json(data);
 
-  } catch (error) {
+  } catch (error: any) {
     console.error("API Error:", error);
     return NextResponse.json(
       { error: "Failed to generate itinerary. Please try again." },
